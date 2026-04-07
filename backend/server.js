@@ -1,13 +1,22 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcrypt';
-import db from './db.js';
+import connectDB from './db.js';
+
+import User from './models/User.js';
+import Leave from './models/Leave.js';
+import Attendance from './models/Attendance.js';
+import Approval from './models/Approval.js';
 
 const app = express();
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
+
+// Connect to MongoDB
+connectDB();
 
 // ---------------------------------
 // AUTHENTICATION & HIERARCHY
@@ -15,19 +24,25 @@ app.use(express.json());
 app.post('/api/register', async (req, res) => {
   const { name, email, role, password, created_by } = req.body;
   try {
-    const [existing] = await db.execute('SELECT * FROM users WHERE email = ?', [email]);
-    if (existing.length > 0) return res.status(400).json({ error: 'Email exists' });
+    const existing = await User.findOne({ email });
+    if (existing) return res.status(400).json({ error: 'Email exists' });
 
     const hash = await bcrypt.hash(password, 10);
-    const [result] = await db.execute(
-      'INSERT INTO users (name, email, role, password, created_by) VALUES (?, ?, ?, ?, ?)',
-      [name, email, role, hash, created_by || null]
-    );
+    const user = await User.create({
+      name,
+      email,
+      role,
+      password: hash,
+      created_by: created_by || null
+    });
 
     // If student, seed a dummy attendance record (75-100%)
     if (role === 'Student') {
       const randomAttendance = (Math.random() * 25 + 75).toFixed(2);
-      await db.execute('INSERT INTO attendance (student_id, attendance_percentage) VALUES (?, ?)', [result.insertId, randomAttendance]);
+      await Attendance.create({
+        student_id: user._id,
+        attendance_percentage: parseFloat(randomAttendance)
+      });
     }
 
     res.status(201).json({ message: 'User added successfully!' });
@@ -40,14 +55,16 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   const { email, password, role } = req.body;
   try {
-    const [users] = await db.execute('SELECT * FROM users WHERE email = ? AND role = ?', [email, role]);
-    if (users.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
+    const user = await User.findOne({ email, role });
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const user = users[0];
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-    res.status(200).json({ message: 'Login successful!', user });
+    const userObj = user.toObject();
+    userObj.id = userObj._id; // Provide frontend compatibility for user.id
+
+    res.status(200).json({ message: 'Login successful!', user: userObj });
   } catch (error) {
     res.status(500).json({ error: 'Failed to log in' });
   }
@@ -55,14 +72,19 @@ app.post('/api/login', async (req, res) => {
 
 app.get('/api/users', async (req, res) => {
     try {
-        const [users] = await db.execute('SELECT id, name, email, role FROM users');
+        const usersDB = await User.find({}, 'name email role');
+        const users = usersDB.map(u => {
+           const uObj = u.toObject();
+           uObj.id = uObj._id;
+           return uObj;
+        });
         res.json(users);
     } catch(err) { res.status(500).json({error: "Failed to fetch users"}); }
 });
 
 app.delete('/api/users/:id', async (req, res) => {
     try {
-        await db.execute('DELETE FROM users WHERE id = ?', [req.params.id]);
+        await User.findByIdAndDelete(req.params.id);
         res.status(200).json({ message: 'User deleted successfully' });
     } catch (error) {
         res.status(500).json({ error: 'Failed to delete user' });
@@ -89,10 +111,10 @@ app.post('/api/leaves', async (req, res) => {
     const isSketchy = sketchyPatterns.some(word => reason.toLowerCase().includes(word));
 
     // 2. Trust Score Formula: (attendance * 0.6) + (approval_rate * 0.4)
-    const [attRows] = await db.execute('SELECT attendance_percentage FROM attendance WHERE student_id = ?', [student_id]);
-    const attendance = attRows.length > 0 ? parseFloat(attRows[0].attendance_percentage) : 80;
+    const attRecord = await Attendance.findOne({ student_id });
+    const attendance = attRecord ? attRecord.attendance_percentage : 80;
 
-    const [allLeaves] = await db.execute('SELECT status FROM leaves WHERE student_id = ?', [student_id]);
+    const allLeaves = await Leave.find({ student_id });
     const pastApprovals = allLeaves.filter(l => l.status === 'Approved').length;
     const totalDecided = allLeaves.filter(l => l.status !== 'Pending').length;
     const approval_rate = totalDecided === 0 ? 100 : (pastApprovals / totalDecided) * 100;
@@ -101,10 +123,16 @@ app.post('/api/leaves', async (req, res) => {
     const trust_score = (attendance * 0.6) + (approval_rate * 0.4);
 
     // 4. Save to Database - All requests start strictly anchored to the Professor Desk
-    const [result] = await db.execute(
-      'INSERT INTO leaves (student_id, number_of_days, start_date, end_date, reason, priority, trust_score, assigned_role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [student_id, number_of_days, start_date, end_date, reason, priority, trust_score, 'Professor']
-    );
+    await Leave.create({
+      student_id,
+      number_of_days,
+      start_date,
+      end_date,
+      reason,
+      priority,
+      trust_score,
+      assigned_role: 'Professor'
+    });
 
     res.status(201).json({ 
         message: 'Leave applied successfully under Manual Workflow escalation logic!', 
@@ -126,20 +154,35 @@ app.get('/api/leaves/:userId/:role', async (req, res) => {
   try {
     let leaves = [];
     if (role === 'Student') {
-      const [rows] = await db.execute(`
-        SELECT l.* 
-        FROM leaves l 
-        WHERE l.student_id = ? ORDER BY l.created_at DESC`, [userId]);
-      leaves = rows;
+      leaves = await Leave.find({ student_id: userId }).sort({ created_at: -1 });
     } else {
       // Principal, HOD and Professor all gain full administrative visibility over queue
-      const [rows] = await db.execute(`
-        SELECT l.*, s.name as student_name FROM leaves l 
-        JOIN users s ON l.student_id = s.id ORDER BY l.created_at DESC`);
-      leaves = rows;
+      leaves = await Leave.find().populate('student_id', 'name').sort({ created_at: -1 });
+      
+      // Map to ensure frontend receives expected data structure smoothly
+      leaves = leaves.map(l => {
+          const leaveObj = l.toObject();
+          leaveObj.student_name = leaveObj.student_id ? leaveObj.student_id.name : 'Unknown';
+          leaveObj.id = leaveObj._id; // Add 'id' to map to '_id'
+          if (leaveObj.student_id && leaveObj.student_id._id) {
+             leaveObj.student_id = leaveObj.student_id._id;
+          }
+          return leaveObj;
+      });
     }
+    
+    // Map _id to id for students too just in case
+    if (role === 'Student') {
+        leaves = leaves.map(l => {
+            const leaveObj = l.toObject();
+            leaveObj.id = leaveObj._id;
+            return leaveObj;
+        });
+    }
+
     res.status(200).json(leaves);
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: 'Failed' });
   }
 });
@@ -152,20 +195,24 @@ app.put('/api/leaves/:leaveId/approve', async (req, res) => {
   try {
     if (decision === 'Escalate') {
         const nextRole = role === 'Professor' ? 'HOD' : 'Principal';
-        await db.execute('UPDATE leaves SET assigned_role = ? WHERE id = ?', [nextRole, leaveId]);
+        await Leave.findByIdAndUpdate(leaveId, { assigned_role: nextRole });
     } else {
-        await db.execute('UPDATE leaves SET status = ? WHERE id = ?', [decision, leaveId]);
+        await Leave.findByIdAndUpdate(leaveId, { status: decision });
     }
     
-    // Map 'Escalate' from UI strictly to 'Escalated' to pass MySQL ENUM data validations!
+    // Map 'Escalate' from UI strictly to 'Escalated' to pass Schema Validation
     const dbDecision = decision === 'Escalate' ? 'Escalated' : decision;
     
-    await db.execute(
-      'INSERT INTO approvals (leave_id, approved_by, role, decision, comments) VALUES (?, ?, ?, ?, ?)',
-       [leaveId, approver_id, role, dbDecision, comments || ""]
-    );
+    await Approval.create({
+      leave_id: leaveId,
+      approved_by: approver_id,
+      role: role,
+      decision: dbDecision,
+      comments: comments || ""
+    });
     res.status(200).json({ message: 'Decision stored successfully!' });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: 'Failed to apply approval route' });
   }
 });
@@ -173,10 +220,19 @@ app.put('/api/leaves/:leaveId/approve', async (req, res) => {
 // Simple Analytics route
 app.get('/api/analytics', async (req, res) => {
     try {
-        const [users] = await db.execute('SELECT role, COUNT(*) as count FROM users GROUP BY role');
-        const [leaves] = await db.execute('SELECT status, COUNT(*) as count FROM leaves GROUP BY status');
+        const usersAggregation = await User.aggregate([
+            { $group: { _id: "$role", count: { $sum: 1 } } }
+        ]);
+        const users = usersAggregation.map(u => ({ role: u._id, count: u.count }));
+        
+        const leavesAggregation = await Leave.aggregate([
+            { $group: { _id: "$status", count: { $sum: 1 } } }
+        ]);
+        const leaves = leavesAggregation.map(l => ({ status: l._id, count: l.count }));
+
         res.json({ users, leaves });
     } catch(err) {
+        console.error(err);
         res.status(500).json({error: "Analytics failed"});
     }
 });
@@ -184,3 +240,5 @@ app.get('/api/analytics', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Backend API Server running on port ${PORT}`);
 });
+
+export default app;

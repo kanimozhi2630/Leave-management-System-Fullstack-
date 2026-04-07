@@ -19,6 +19,7 @@ const Dashboard = () => {
   const [subordinates, setSubordinates] = useState([]);
   const [stats, setStats] = useState({ attendance: 100, trustScore: 100 });
   const [sysAnalytics, setSysAnalytics] = useState({ users: [], leaves: [] });
+  const [viewedLetter, setViewedLetter] = useState(null);
 
   useEffect(() => {
     // If user doesn't exist, or their session is corrupted from an old version
@@ -29,9 +30,9 @@ const Dashboard = () => {
     }
     fetchLeaves();
     if (user.role === 'Student') {
-       fetch(`http://localhost:5000/api/stats/${user.id}`).then(r=>r.json()).then(d=>setStats(d)).catch(e=>{});
+       fetch(`${import.meta.env.VITE_API_URL || "http://localhost:5000"}/api/stats/${user.id}`).then(r=>r.json()).then(d=>setStats(d)).catch(e=>{});
     } else if (user.role === 'Principal' || user.role === 'HOD') {
-       fetch(`http://localhost:5000/api/analytics`).then(r=>r.json()).then(d=>setSysAnalytics(d)).catch(e=>{});
+       fetch(`${import.meta.env.VITE_API_URL || "http://localhost:5000"}/api/analytics`).then(r=>r.json()).then(d=>setSysAnalytics(d)).catch(e=>{});
     }
   }, [user, navigate]);
 
@@ -43,7 +44,7 @@ const Dashboard = () => {
 
   const fetchLeaves = async () => {
     try {
-      const res = await fetch(`http://localhost:5000/api/leaves/${id}/${role}`);
+      const res = await fetch(`${import.meta.env.VITE_API_URL || "http://localhost:5000"}/api/leaves/${id}/${role}`);
       if (res.ok) setLeaves(await res.json());
     } catch(err) { console.error(err); }
   };
@@ -56,7 +57,7 @@ const Dashboard = () => {
   const handleApplyLeave = async (e) => {
     e.preventDefault();
     try {
-      const response = await fetch('http://localhost:5000/api/leaves', {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/leaves`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ student_id: id, ...formData })
@@ -70,7 +71,7 @@ const Dashboard = () => {
         setFormData({ start_date: '', end_date: '', reason: '' });
         fetchLeaves();
         if (role === 'Student') {
-           fetch(`http://localhost:5000/api/stats/${id}`).then(r=>r.json()).then(d=>setStats(d)).catch(e=>{});
+           fetch(`${import.meta.env.VITE_API_URL || "http://localhost:5000"}/api/stats/${id}`).then(r=>r.json()).then(d=>setStats(d)).catch(e=>{});
         }
       } else {
         alert("Submission Failed");
@@ -80,7 +81,7 @@ const Dashboard = () => {
 
   const handleUpdateStatus = async (leaveId, decision) => {
     try {
-      const response = await fetch(`http://localhost:5000/api/leaves/${leaveId}/approve`, {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || "http://localhost:5000"}/api/leaves/${leaveId}/approve`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ decision, approver_id: id, role })
@@ -94,7 +95,7 @@ const Dashboard = () => {
   const fetchSubordinates = async () => {
     if (!targetRoleAdd) return;
     try {
-      const res = await fetch('http://localhost:5000/api/users');
+      const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/users`);
       if (res.ok) {
         const users = await res.json();
         setSubordinates(users.filter(u => u.role === targetRoleAdd));
@@ -109,7 +110,7 @@ const Dashboard = () => {
   const handleDeleteUser = async (userId) => {
     if (!window.confirm(`Are you sure you want to delete this ${targetRoleAdd}? All their data will be erased.`)) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/users/${userId}`, { method: 'DELETE' });
+      const res = await fetch(`${import.meta.env.VITE_API_URL || "http://localhost:5000"}/api/users/${userId}`, { method: 'DELETE' });
       if (res.ok) fetchSubordinates();
     } catch(err) { alert('Error deleting user'); }
   };
@@ -117,7 +118,7 @@ const Dashboard = () => {
   const handleAddUser = async (e) => {
      e.preventDefault();
      try {
-       const res = await fetch('http://localhost:5000/api/register', {
+       const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/register`, {
            method: 'POST',
            headers: {'Content-Type': 'application/json'},
            body: JSON.stringify({ ...subordinateForm, role: targetRoleAdd, created_by: id })
@@ -275,7 +276,6 @@ const Dashboard = () => {
             <table style={{width: '100%', borderCollapse: 'collapse'}}>
               <thead>
                 <tr style={{textAlign: 'left', borderBottom: '2px solid #f1f5f9'}}>
-                  <th style={{padding: '1rem'}}>ID</th>
                   {role !== 'Student' && <th style={{padding: '1rem'}}>Student</th>}
                   <th style={{padding: '1rem'}}>Priority Class</th>
                   <th style={{padding: '1rem'}}>Requested Dates</th>
@@ -288,10 +288,13 @@ const Dashboard = () => {
                 ) : (
                   displayedLeaves.map(leave => (
                     <tr key={leave.id} style={{borderBottom: '1px solid #f1f5f9', background: leave.priority === 'High' ? '#fff1f2' : 'transparent'}}>
-                      <td style={{padding: '1rem'}}>#{leave.id}</td>
                       {role !== 'Student' && <td style={{padding: '1rem'}}><b>{leave.student_name}</b> <br/><small>Overall Trust: {Number(leave.trust_score).toFixed(0)}%</small></td>}
                       <td style={{padding: '1rem'}}><span style={{color: leave.priority==='High'?'#e11d48':'#475569', fontWeight: leave.priority==='High'?'bold':'normal'}}>{leave.priority}</span></td>
-                      <td style={{padding: '1rem'}}>{leave.start_date ? `${new Date(leave.start_date).toLocaleDateString()} to ${new Date(leave.end_date).toLocaleDateString()}` : `${leave.number_of_days} Day(s)`} <br/><em style={{fontSize:'0.8rem', color:'#64748b'}}>{leave.reason.substring(0, 30)}...</em></td>
+                      <td style={{padding: '1rem'}}>
+                         {leave.start_date ? `${new Date(leave.start_date).toLocaleDateString()} to ${new Date(leave.end_date).toLocaleDateString()}` : `${leave.number_of_days} Day(s)`} 
+                         <br/>
+                         <button onClick={() => setViewedLetter(leave.reason)} style={{background: 'none', border: 'none', color: '#0d9488', textDecoration: 'underline', cursor: 'pointer', padding: 0, fontSize: '0.85rem', marginTop: '0.5rem', fontWeight: 'bold'}}>View Request Letter</button>
+                      </td>
                       <td style={{padding: '1rem'}}>
                         {role !== 'Student' && leave.status === 'Pending' ? (
                            leave.assigned_role === role ? (
@@ -324,6 +327,22 @@ const Dashboard = () => {
             setShowApplyForm(true);
           }} />
         )}
+
+        {/* View Letter Modal */}
+        {viewedLetter && (
+           <div style={{position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000}}>
+             <div style={{background: 'white', padding: '2rem', borderRadius: '12px', maxWidth: '600px', width: '90%'}}>
+               <h3 style={{marginTop: 0, marginBottom: '1rem'}}>Leave Request Letter</h3>
+               <div style={{background: '#f8fafc', padding: '1rem', borderRadius: '8px', border: '1px solid #e2e8f0', whiteSpace: 'pre-wrap', color: '#334155', lineHeight: '1.6', maxHeight: '60vh', overflowY: 'auto'}}>
+                 {viewedLetter}
+               </div>
+               <div style={{marginTop: '1.5rem', textAlign: 'right'}}>
+                 <button onClick={() => setViewedLetter(null)} style={{background: '#0d9488', color: 'white', border: 'none', padding: '0.6rem 1.5rem', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold'}}>Close</button>
+               </div>
+             </div>
+           </div>
+        )}
+
       </main>
     </div>
   );
